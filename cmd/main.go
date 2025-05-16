@@ -2,62 +2,142 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"net/url"
 	"os"
 	"strings"
+
+	"github.com/pure-nomad/cordkit"
 )
 
 type UserFlags struct {
-	Interval int
-	Keywords []string
-	URLs     []string
-	Headers  []string
+	Interval       int
+	Keywords       []string
+	URLs           []string
+	Headers        []string
+	CordkitEnabled bool
+	Timeout        int
+	Verbose        bool
 }
 
 func main() {
 	fmt.Println("TraceScout - Made By Erg0sum")
 
-	var interval int
-	var keywords string
-	var headers string
-	var list string
-
-	flag.IntVar(
-		&interval,
-		"interval",
-		60,
-		"Polling interval in seconds for Trace.axd updates — example: -interval 300",
-	)
-	flag.StringVar(
-		&keywords,
-		"keywords",
-		"session,authorization,password,username,token",
-		"Comma‑separated keywords to scan in Trace.axd requests — example: -keywords auth,token",
-	)
-	flag.StringVar(
-		&headers,
-		"headers",
-		"",
-		"Comma‑separated HTTP headers (e.g., -headers \"User-Agent: bugbounty,Cookie: session=true\")",
+	var (
+		interval   = flag.Int("interval", 60, "Polling interval in seconds for Trace.axd updates — example: -interval 300")
+		keywords   = flag.String("keywords", "session,authorization,password,username,token", "Comma‑separated keywords to scan")
+		headers    = flag.String("headers", "", "Comma‑separated HTTP headers; e.g., \"User-Agent: bugbounty,Cookie: session=true\"")
+		list       = flag.String("list", "", "Path to file with URLs to monitor; example: -list hosts.txt")
+		configPath = flag.String("config", "", "Path to config JSON file; required if cordkit is enabled")
+		ckEnabled  = flag.Bool("cordkit", false, "Enable Cordkit (Discord Notifications)")
+		timeout    = flag.Int("timeout", 15, "HTTP timeout for requests")
+		verbose    = flag.Bool("verbose", false, "Verbose Logging")
 	)
 
-	flag.StringVar(
-		&list,
-		"list",
-		"",
-		"Path to file with URLs to monitor; example: -list hosts.txt",
-	)
 	flag.Parse()
-	options, err := formatFlags(interval, keywords, headers, list)
+
+	if *ckEnabled && *configPath == "" {
+		log.Fatal("error: -cordkit requires -config <path to JSON config>")
+	}
+
+	if *list == "" {
+		fmt.Fprintln(os.Stderr, "error: -list <file> is required; -h for help")
+		os.Exit(2)
+	}
+
+	read_list, err := readURLs(*list)
 	if err != nil {
-		log.Fatalln("Error formatting use flags: ", err)
+		log.Panicf("%s", err)
+	}
+
+	var opts *UserFlags
+
+	opts = &UserFlags{
+		Interval:       *interval,
+		Keywords:       splitCSV(*keywords),
+		Headers:        splitCSV(*headers),
+		URLs:           read_list,
+		CordkitEnabled: *ckEnabled,
+		Timeout:        *timeout,
+		Verbose:        *verbose,
+	}
+
+	if *configPath != "" {
+		opts, err = parseConfig(*configPath)
+		if err != nil {
+			log.Panicf("%s", err)
+		}
+	}
+
+	if opts.Interval <= 0 {
+		log.Fatal("interval must be > 0")
+	}
+
+	var bot *cordkit.Bot
+	if opts.CordkitEnabled {
+		bot, err = cordkitInit(*configPath)
+		if err != nil {
+			log.Panicf("cordkit init failed: %v", err)
+		}
+		defer bot.Stop()
+		bot.Start()
+		bot.SendMsg("1372558505562869905", "testing")
 	}
 
 	log.Println("User Flags")
-	log.Println(options)
+	log.Println(opts)
+}
+
+func cordkitInit(config string) (*cordkit.Bot, error) {
+	b, err := cordkit.NewBot(config)
+	if err != nil {
+		return nil, err
+	}
+
+	return b, nil
+}
+
+func splitCSV(s string) []string {
+	out := []string{}
+	for _, part := range strings.Split(s, ",") {
+		p := strings.TrimSpace(part)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func parseConfig(filename string) (*UserFlags, error) {
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return nil, err
+	}
+
+	var raw struct {
+		Interval       int    `json:"interval"`
+		Keywords       string `json:"keywords"`
+		Headers        string `json:"headers"`
+		CordkitEnabled bool   `json:"cordkit_enabled"`
+		Timeout        int    `json:"timeout"`
+		Verbose        bool   `json:"verbose"`
+	}
+
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+
+	return &UserFlags{
+		Interval:       raw.Interval,
+		Keywords:       splitCSV(raw.Keywords),
+		Headers:        splitCSV(raw.Headers),
+		CordkitEnabled: raw.CordkitEnabled,
+		Timeout:        raw.Timeout,
+		Verbose:        raw.Verbose,
+	}, nil
 }
 
 func readURLs(filename string) ([]string, error) {
@@ -97,26 +177,4 @@ func readURLs(filename string) ([]string, error) {
 		return nil, err
 	}
 	return out, nil
-}
-
-func formatFlags(interval int, keywords string, headers string, list string) (*UserFlags, error) {
-
-	kw := strings.Split(keywords, ",")
-	hd := strings.Split(headers, ",")
-
-	var uri []string
-	if list != "" {
-		var err error
-		uri, err = readURLs(list)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return &UserFlags{
-		Interval: interval,
-		Keywords: kw,
-		Headers:  hd,
-		URLs:     uri,
-	}, nil
 }
